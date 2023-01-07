@@ -188,4 +188,9 @@ public interface Storage {
      * @param path starting path
      */
     void deleteEmptyDirsUp(String path);
+
+    /**
+     * Closes any resources the storage implementation may have open.
+     */
+    void close();
 }

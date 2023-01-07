@@ -347,4 +347,12 @@ public class FileSystemStorage implements Storage {
         var fullPath = storageRoot.resolve(path);
         FileUtil.deleteDirAndParentsIfEmpty(fullPath);
     }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close() {
+        // no-op
+    }
 }

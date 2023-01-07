@@ -34,6 +34,11 @@ import java.util.Collection;
 public interface CloudClient {
 
     /**
+     * Close any resources the client may have created. This will NOT close resources that were passed into the client.
+     */
+    void close();
+
+    /**
      * The name of the bucket the OCFL repository is in.
      *
      * @return bucket name

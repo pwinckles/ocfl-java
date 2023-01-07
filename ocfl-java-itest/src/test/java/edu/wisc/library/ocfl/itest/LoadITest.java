@@ -36,9 +36,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.transfer.s3.S3TransferManager;
 
 @Disabled
 public class LoadITest {
@@ -264,12 +264,11 @@ public class LoadITest {
         var objectPath = createTestObject(1, 3 * MB);
         var prefix = UUID.randomUUID().toString();
 
-        var s3Client = S3Client.builder()
-                .region(Region.US_EAST_2)
-                .httpClientBuilder(ApacheHttpClient.builder())
-                .build();
+        var s3Client = S3AsyncClient.crtBuilder().region(Region.US_EAST_2).build();
+        var transferManager = S3TransferManager.builder().s3Client(s3Client).build();
         var cloutClient = OcflS3Client.builder()
                 .s3Client(s3Client)
+                .transferManager(transferManager)
                 .bucket("pwinckles-ocfl")
                 .repoPrefix(prefix)
                 .build();
@@ -293,6 +292,9 @@ public class LoadITest {
         System.out.println("Finished. Waiting for metrics collection...");
         TimeUnit.SECONDS.sleep(30);
         System.out.println("Done");
+
+        s3Client.close();
+        transferManager.close();
     }
 
     private void runPutTest(
@@ -445,10 +447,8 @@ public class LoadITest {
     }
 
     private MutableOcflRepository createS3Repo() {
-        var s3Client = S3Client.builder()
-                .region(Region.US_EAST_2)
-                .httpClientBuilder(ApacheHttpClient.builder())
-                .build();
+        var s3Client = S3AsyncClient.crtBuilder().region(Region.US_EAST_2).build();
+        var transferManager = S3TransferManager.builder().s3Client(s3Client).build();
         var prefix = UUID.randomUUID().toString();
         // Note this is NOT using a db, which an S3 setup would normally use
         return new OcflRepositoryBuilder()
@@ -459,6 +459,7 @@ public class LoadITest {
                             .bucket("pwinckles-ocfl")
                             .repoPrefix(prefix)
                             .s3Client(s3Client)
+                            .transferManager(transferManager)
                             .build());
                 })
                 .workDir(UncheckedFiles.createDirectories(tempRoot.resolve("temp")))

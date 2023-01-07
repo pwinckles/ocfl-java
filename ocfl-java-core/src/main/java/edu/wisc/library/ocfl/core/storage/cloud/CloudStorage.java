@@ -328,6 +328,14 @@ public class CloudStorage implements Storage {
         // no-op
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close() {
+        client.close();
+    }
+
     private void failOnExistingFile(String path) {
         if (fileExists(path)) {
             throw new OcflFileAlreadyExistsException(String.format("File %s already exists", path));

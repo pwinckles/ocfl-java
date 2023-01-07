@@ -7,13 +7,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static software.amazon.awssdk.http.SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES;
 
-import at.favre.lib.bytes.Bytes;
 import com.adobe.testing.s3mock.junit5.S3MockExtension;
 import edu.wisc.library.ocfl.core.storage.cloud.KeyNotFoundException;
 import edu.wisc.library.ocfl.core.storage.cloud.ListResult;
 import edu.wisc.library.ocfl.core.util.FileUtil;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,6 +24,7 @@ import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -32,11 +34,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.apache.ApacheHttpClient;
+import software.amazon.awssdk.core.async.AsyncResponseTransformer;
+import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
 import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.S3Object;
+import software.amazon.awssdk.utils.AttributeMap;
 
 public class OcflS3ClientTest {
 
@@ -48,7 +53,7 @@ public class OcflS3ClientTest {
     @RegisterExtension
     public static S3MockExtension S3_MOCK = S3MockExtension.builder().silent().build();
 
-    private static S3Client awsS3Client;
+    private static S3AsyncClient awsS3Client;
     private static OcflS3Client client;
     private static String bucket;
 
@@ -63,20 +68,33 @@ public class OcflS3ClientTest {
 
         if (StringUtils.isNotBlank(accessKey) && StringUtils.isNotBlank(secretKey) && StringUtils.isNotBlank(bucket)) {
             LOG.info("Running tests against AWS");
-            awsS3Client = S3Client.builder()
+            awsS3Client = S3AsyncClient.crtBuilder()
                     .region(Region.US_EAST_2)
                     .credentialsProvider(
                             StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKey, secretKey)))
-                    .httpClientBuilder(ApacheHttpClient.builder())
                     .build();
             OcflS3ClientTest.bucket = bucket;
         } else {
             LOG.info("Running tests against S3 Mock");
-            awsS3Client = S3_MOCK.createS3ClientV2();
+            awsS3Client = S3AsyncClient.builder()
+                    .endpointOverride(URI.create(S3_MOCK.getServiceEndpoint()))
+                    .region(Region.US_EAST_2)
+                    .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("foo", "bar")))
+                    .serviceConfiguration(S3Configuration.builder()
+                            .pathStyleAccessEnabled(true)
+                            .build())
+                    .httpClient(NettyNioAsyncHttpClient.builder()
+                            .buildWithDefaults(AttributeMap.builder()
+                                    .put(TRUST_ALL_CERTIFICATES, Boolean.TRUE)
+                                    .build()))
+                    .build();
+            ;
             OcflS3ClientTest.bucket = UUID.randomUUID().toString();
-            awsS3Client.createBucket(request -> {
-                request.bucket(OcflS3ClientTest.bucket);
-            });
+            awsS3Client
+                    .createBucket(request -> {
+                        request.bucket(OcflS3ClientTest.bucket);
+                    })
+                    .join();
         }
 
         client = OcflS3Client.builder()
@@ -84,6 +102,12 @@ public class OcflS3ClientTest {
                 .bucket(OcflS3ClientTest.bucket)
                 .repoPrefix(REPO_PREFIX)
                 .build();
+    }
+
+    @AfterAll
+    public static void afterAll() {
+        awsS3Client.close();
+        client.close();
     }
 
     @AfterEach
@@ -123,79 +147,23 @@ public class OcflS3ClientTest {
 
         assertObjectsExist(bucket, List.of(key1, key2));
 
-        try (var response = awsS3Client.getObject(builder -> {
-            builder.bucket(bucket)
-                    .key(FileUtil.pathJoinIgnoreEmpty(REPO_PREFIX, key1))
-                    .build();
-        })) {
+        try (var response = awsS3Client
+                .getObject(
+                        builder -> builder.bucket(bucket)
+                                .key(FileUtil.pathJoinIgnoreEmpty(REPO_PREFIX, key1))
+                                .build(),
+                        AsyncResponseTransformer.toBlockingInputStream())
+                .join()) {
             assertEquals("text/plain", response.response().contentType());
         }
-        try (var response = awsS3Client.getObject(builder -> {
-            builder.bucket(bucket)
-                    .key(FileUtil.pathJoinIgnoreEmpty(REPO_PREFIX, key2))
-                    .build();
-        })) {
+        try (var response = awsS3Client
+                .getObject(
+                        builder -> builder.bucket(bucket)
+                                .key(FileUtil.pathJoinIgnoreEmpty(REPO_PREFIX, key2))
+                                .build(),
+                        AsyncResponseTransformer.toBlockingInputStream())
+                .join()) {
             assertEquals("application/octet-stream", response.response().contentType());
-        }
-    }
-
-    @Test
-    public void multipartUpload() {
-        var size = 1024 * 1024 * 5;
-        client.setMaxPartBytes(size);
-        client.setPartSizeBytes(size);
-
-        var key = "dir/sub/test.txt";
-
-        var byteString = Bytes.random(size + 100).encodeHex();
-
-        client.uploadFile(createFile(byteString), key);
-
-        assertObjectsExist(bucket, List.of(key));
-
-        assertEquals(byteString, client.downloadString(key));
-    }
-
-    @Test
-    public void multipartUploadWithModification() throws IOException {
-        var client = OcflS3Client.builder()
-                .s3Client(awsS3Client)
-                .bucket(bucket)
-                .repoPrefix(REPO_PREFIX)
-                .createMultipartModifier((key, builder) -> {
-                    if (key.endsWith("/test.txt")) {
-                        builder.contentType("text/plain");
-                    }
-                })
-                .build();
-        var size = 1024 * 1024 * 5;
-        client.setMaxPartBytes(size);
-        client.setPartSizeBytes(size);
-
-        var key1 = "dir/sub/test.txt";
-        var key2 = "dir/sub/test.json";
-
-        var byteString = Bytes.random(size + 100).encodeHex();
-        client.uploadFile(createFile(byteString), key1);
-
-        byteString = Bytes.random(size + 100).encodeHex();
-        client.uploadFile(createFile(byteString), key2);
-
-        assertObjectsExist(bucket, List.of(key1, key2));
-
-        try (var response = awsS3Client.getObject(builder -> {
-            builder.bucket(bucket)
-                    .key(FileUtil.pathJoinIgnoreEmpty(REPO_PREFIX, key1))
-                    .build();
-        })) {
-            assertEquals("text/plain", response.response().contentType());
-        }
-        try (var response = awsS3Client.getObject(builder -> {
-            builder.bucket(bucket)
-                    .key(FileUtil.pathJoinIgnoreEmpty(REPO_PREFIX, key2))
-                    .build();
-        })) {
-            assertEquals("binary/octet-stream", response.response().contentType());
         }
     }
 
@@ -424,10 +392,12 @@ public class OcflS3ClientTest {
     }
 
     private void assertObjectsExist(String bucket, Collection<String> expectedKeys) {
-        var result = awsS3Client.listObjectsV2(ListObjectsV2Request.builder()
-                .bucket(bucket)
-                .prefix(REPO_PREFIX)
-                .build());
+        var result = awsS3Client
+                .listObjectsV2(ListObjectsV2Request.builder()
+                        .bucket(bucket)
+                        .prefix(REPO_PREFIX)
+                        .build())
+                .join();
 
         var actualKeys = result.contents().stream().map(S3Object::key).collect(Collectors.toList());
         var prefixedExpected = expectedKeys.stream()

@@ -4,6 +4,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static software.amazon.awssdk.http.SdkHttpConfigurationOption.TRUST_ALL_CERTIFICATES;
 
 import com.adobe.testing.s3mock.junit5.S3MockExtension;
 import edu.wisc.library.ocfl.api.MutableOcflRepository;
@@ -18,6 +19,7 @@ import edu.wisc.library.ocfl.core.util.FileUtil;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Collection;
@@ -26,6 +28,7 @@ import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -35,11 +38,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.apache.ApacheHttpClient;
+import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
 import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.S3Object;
+import software.amazon.awssdk.utils.AttributeMap;
 
 public class OcflS3Test {
 
@@ -54,7 +59,7 @@ public class OcflS3Test {
     @RegisterExtension
     public static S3MockExtension S3_MOCK = S3MockExtension.builder().silent().build();
 
-    private static S3Client s3Client;
+    private static S3AsyncClient s3Client;
     private static CloudClient cloudClient;
     private static String bucket;
 
@@ -69,20 +74,31 @@ public class OcflS3Test {
 
         if (StringUtils.isNotBlank(accessKey) && StringUtils.isNotBlank(secretKey) && StringUtils.isNotBlank(bucket)) {
             LOG.info("Running tests against AWS");
-            s3Client = S3Client.builder()
+            s3Client = S3AsyncClient.crtBuilder()
                     .region(Region.US_EAST_2)
                     .credentialsProvider(
                             StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKey, secretKey)))
-                    .httpClientBuilder(ApacheHttpClient.builder())
                     .build();
             OcflS3Test.bucket = bucket;
         } else {
             LOG.info("Running tests against S3 Mock");
-            s3Client = S3_MOCK.createS3ClientV2();
+            s3Client = S3AsyncClient.builder()
+                    .endpointOverride(URI.create(S3_MOCK.getServiceEndpoint()))
+                    .region(Region.US_EAST_2)
+                    .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("foo", "bar")))
+                    .serviceConfiguration(S3Configuration.builder()
+                            .pathStyleAccessEnabled(true)
+                            .build())
+                    .httpClient(NettyNioAsyncHttpClient.builder()
+                            .buildWithDefaults(AttributeMap.builder()
+                                    .put(TRUST_ALL_CERTIFICATES, Boolean.TRUE)
+                                    .build()))
+                    .build();
             OcflS3Test.bucket = UUID.randomUUID().toString();
             s3Client.createBucket(request -> {
-                request.bucket(OcflS3Test.bucket);
-            });
+                        request.bucket(OcflS3Test.bucket);
+                    })
+                    .join();
         }
 
         cloudClient = OcflS3Client.builder()
@@ -90,6 +106,12 @@ public class OcflS3Test {
                 .bucket(OcflS3Test.bucket)
                 .repoPrefix(REPO_PREFIX)
                 .build();
+    }
+
+    @AfterAll
+    public static void afterAll() {
+        s3Client.close();
+        cloudClient.close();
     }
 
     @AfterEach
@@ -227,9 +249,10 @@ public class OcflS3Test {
 
     private void assertObjectsExist(String bucket, String prefix, Collection<String> expectedKeys) {
         var result = s3Client.listObjectsV2(ListObjectsV2Request.builder()
-                .bucket(bucket)
-                .prefix(FileUtil.pathJoinIgnoreEmpty(REPO_PREFIX, prefix))
-                .build());
+                        .bucket(bucket)
+                        .prefix(FileUtil.pathJoinIgnoreEmpty(REPO_PREFIX, prefix))
+                        .build())
+                .join();
 
         var actualKeys = result.contents().stream().map(S3Object::key).collect(Collectors.toList());
         var prefixedExpected = expectedKeys.stream()
