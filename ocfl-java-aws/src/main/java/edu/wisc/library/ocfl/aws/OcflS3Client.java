@@ -24,6 +24,7 @@
 
 package edu.wisc.library.ocfl.aws;
 
+import edu.wisc.library.ocfl.api.OcflRepository;
 import edu.wisc.library.ocfl.api.exception.OcflIOException;
 import edu.wisc.library.ocfl.api.util.Enforce;
 import edu.wisc.library.ocfl.core.storage.cloud.CloudClient;
@@ -68,8 +69,6 @@ public class OcflS3Client implements CloudClient {
 
     private static final Logger LOG = LoggerFactory.getLogger(OcflS3Client.class);
 
-    // TODO TM add more notes about CRT client
-    // TODO TM notes about closing
     private final S3AsyncClient s3Client;
     private final S3TransferManager transferManager;
     private final String bucket;
@@ -569,7 +568,12 @@ public class OcflS3Client implements CloudClient {
         private BiConsumer<String, PutObjectRequest.Builder> putObjectModifier;
 
         /**
-         * The AWS SDK S3 client. This SHOULD be a CRT client. Required.
+         * The AWS SDK S3 client. Required.
+         * <p>
+         * This <b>SHOULD</b> be a {@link <a href="https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/crt-based-s3-client.html">CRT client</a>}.
+         * The reason for this is that the {@link S3TransferManager} requires the CRT client for doing multipart uploads.
+         * <p>
+         * This client is NOT closed when the repository is closed, and the user is responsible for closing it when appropriate.
          *
          * @param s3Client s3 client
          * @return builder
@@ -583,6 +587,9 @@ public class OcflS3Client implements CloudClient {
          * The AWS SDK S3 transfer manager. This only needs to be specified when you need to set specific settings, and,
          * if it is specified, it can use the same S3 client as was supplied in {@link #s3Client(S3AsyncClient)}.
          * Otherwise, when not specified, the default transfer manager is created using the provided S3 Client.
+         * <p>
+         * When a transfer manager is provided, it will NOT be closed when the repository is closed, and the user is
+         * responsible for closing it when appropriate.
          *
          * @param transferManager S3 transfer manager
          * @return builder
@@ -630,7 +637,10 @@ public class OcflS3Client implements CloudClient {
         }
 
         /**
-         * Constructs a new OcflS3Client. s3Client and bucket must be set.
+         * Constructs a new {@link OcflS3Client}. {@link #s3Client(S3AsyncClient)} and {@link #bucket(String)} must be set.
+         * <p>
+         * Remember to call {@link OcflRepository#close()} when you are done with the repository so that the default
+         * S3 transfer manager is closed.
          *
          * @return OcflS3Client
          */

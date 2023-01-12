@@ -63,7 +63,7 @@ import java.util.function.Consumer;
 
 /**
  * Constructs a local file system based OCFL repository sensible defaults that can be overridden prior to calling
- * build().
+ * {@link #build()}.
  *
  * <p>Important: The same OcflRepositoryBuilder instance MUST NOT be used to initialize multiple repositories.
  */
@@ -86,7 +86,7 @@ public class OcflRepositoryBuilder {
 
     /**
      * Constructs a local file system based OCFL repository sensible defaults that can be overridden prior to calling
-     * build().
+     * {@link #build()}.
      *
      * <p>Important: The same OcflRepositoryBuilder instance MUST NOT be used to initialize multiple repositories.
      */
@@ -375,6 +375,8 @@ public class OcflRepositoryBuilder {
 
     /**
      * Constructs an OCFL repository. Brand new repositories are initialized.
+     * <p>
+     * Remember to call {@link OcflRepository#close()} when you are done with the repository.
      *
      * @return OcflRepository
      */
@@ -384,6 +386,8 @@ public class OcflRepositoryBuilder {
 
     /**
      * Constructs an OCFL repository that allows the use of the Mutable HEAD Extension. Brand new repositories are initialized.
+     * <p>
+     * Remember to call {@link OcflRepository#close()} when you are done with the repository.
      *
      * @return MutableOcflRepository
      */

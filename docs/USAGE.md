@@ -165,6 +165,33 @@ on large files or objects with lots of files. Additionally, it does
 not cache any object files locally, requiring them to be retrieved
 from S3 on every access.
 
+### S3 Transfer Manager
+
+`ocfl-java` uses the new [S3 Transfer
+Manager](https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/transfer-manager.html)
+to upload and download files from S3. You can configure the transfer
+manager to target a specific throughput, based on the needs of your
+application. Consult the official documentation for details.
+
+However, note that it is **crucial** that you configure the transfer
+manager to use the new [CRT S3
+client](https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/crt-based-s3-client.html).
+The CRT client is **required** by the transfer manager in order to
+make multipart uploads.
+
+If you do not specify a transfer manager when constructing the
+`OcflS3Client`, then it will create the default transfer manager using
+the S3 client it was provided, which, again, should be a CRT client.
+When you use the default transfer manager, you need to be sure to
+close the `OcflRepository` when you are done with it, otherwise the
+transfer manager will not be closed.
+
+For example, you might construct the S3 client like:
+
+``` java
+S3AsyncClient.crtBuilder().build()
+```
+
 ### Configuration
 
 Use `OcflStorageBuilder.builder()` to create and configure an
