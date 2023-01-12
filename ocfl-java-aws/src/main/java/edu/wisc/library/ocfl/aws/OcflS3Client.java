@@ -570,7 +570,7 @@ public class OcflS3Client implements CloudClient {
         /**
          * The AWS SDK S3 client. Required.
          * <p>
-         * This <b>SHOULD</b> be a {@link <a href="https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/crt-based-s3-client.html">CRT client</a>}.
+         * This <b>SHOULD</b> be a <a href="https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/crt-based-s3-client.html">CRT client</a>.
          * The reason for this is that the {@link S3TransferManager} requires the CRT client for doing multipart uploads.
          * <p>
          * This client is NOT closed when the repository is closed, and the user is responsible for closing it when appropriate.
