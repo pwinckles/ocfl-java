@@ -60,6 +60,7 @@ import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.transfer.s3.S3TransferManager;
 
 /**
@@ -244,7 +245,7 @@ public class OcflS3Client implements CloudClient {
             copy.completionFuture().join();
         } catch (RuntimeException e) {
             var cause = unwrapCompletionEx(e);
-            if (cause instanceof NoSuchKeyException) {
+            if (wasNotFound(cause)) {
                 throw new KeyNotFoundException("Key " + srcKey + " not found in bucket " + bucket, cause);
             }
             throw new OcflS3Exception("Failed to copy object from " + srcKey + " to " + dstKey, cause);
@@ -270,7 +271,7 @@ public class OcflS3Client implements CloudClient {
             download.completionFuture().join();
         } catch (RuntimeException e) {
             var cause = unwrapCompletionEx(e);
-            if (cause instanceof NoSuchKeyException) {
+            if (wasNotFound(cause)) {
                 throw new KeyNotFoundException("Key " + srcKey + " not found in bucket " + bucket, cause);
             }
             throw new OcflS3Exception("Failed to download " + srcKey + " to " + dstPath, cause);
@@ -297,7 +298,7 @@ public class OcflS3Client implements CloudClient {
                     .join();
         } catch (RuntimeException e) {
             var cause = unwrapCompletionEx(e);
-            if (cause instanceof NoSuchKeyException) {
+            if (wasNotFound(cause)) {
                 throw new KeyNotFoundException("Key " + srcKey + " not found in bucket " + bucket, cause);
             }
             throw new OcflS3Exception("Failed to download " + srcKey, cause);
@@ -337,7 +338,7 @@ public class OcflS3Client implements CloudClient {
                     .setLastModified(s3Result.lastModified());
         } catch (RuntimeException e) {
             var cause = unwrapCompletionEx(e);
-            if (cause instanceof NoSuchKeyException) {
+            if (wasNotFound(cause)) {
                 throw new KeyNotFoundException("Key " + key + " not found in bucket " + bucket, cause);
             }
             throw new OcflS3Exception("Failed to HEAD " + key, cause);
@@ -479,7 +480,7 @@ public class OcflS3Client implements CloudClient {
             return true;
         } catch (RuntimeException e) {
             var cause = unwrapCompletionEx(e);
-            if (cause instanceof NoSuchBucketException) {
+            if (wasNotFound(cause)) {
                 return false;
             }
             throw new OcflS3Exception("Failed ot HEAD bucket " + bucket, cause);
@@ -557,6 +558,23 @@ public class OcflS3Client implements CloudClient {
             cause = e.getCause();
         }
         return cause;
+    }
+
+    /**
+     * Returns true if the exception indicates the object/bucket was NOT found in S3.
+     *
+     * @param e the exception
+     * @return true if the object/bucket was NOT found in S3.
+     */
+    private boolean wasNotFound(Throwable e) {
+        if (e instanceof NoSuchKeyException || e instanceof NoSuchBucketException) {
+            return true;
+        } else if (e instanceof S3Exception) {
+            // It seems like the CRT client does not return NoSuchKeyExceptions...
+            var s3e = (S3Exception) e;
+            return 404 == s3e.statusCode();
+        }
+        return false;
     }
 
     public static class Builder {
