@@ -37,10 +37,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
@@ -49,7 +51,6 @@ import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.async.AsyncResponseTransformer;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
-import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest;
@@ -438,10 +439,18 @@ public class OcflS3Client implements CloudClient {
                     .collect(Collectors.toList());
 
             try {
-                s3Client.deleteObjects(DeleteObjectsRequest.builder()
-                                .bucket(bucket)
-                                .delete(Delete.builder().objects(objectIds).build())
-                                .build())
+                var futures = new ArrayList<CompletableFuture<?>>();
+
+                // Can only delete at most 1,000 objects per request
+                for (int i = 0; i < objectIds.size(); i += 999) {
+                    var toDelete = objectIds.subList(i, Math.min(objectIds.size(), i + 999));
+                    futures.add(s3Client.deleteObjects(DeleteObjectsRequest.builder()
+                            .bucket(bucket)
+                            .delete(builder -> builder.objects(toDelete))
+                            .build()));
+                }
+
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[] {}))
                         .join();
             } catch (RuntimeException e) {
                 throw new OcflS3Exception("Failed to delete objects " + objectIds, unwrapCompletionEx(e));
