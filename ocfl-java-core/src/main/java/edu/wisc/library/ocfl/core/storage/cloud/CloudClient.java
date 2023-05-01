@@ -27,6 +27,7 @@ package edu.wisc.library.ocfl.core.storage.cloud;
 import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.Collection;
+import java.util.concurrent.Future;
 
 /**
  * Wrapper interface abstracting cloud provider clients
@@ -53,6 +54,24 @@ public interface CloudClient {
      */
     String prefix();
 
+    /**
+     * Asynchronously uploads a file to the destination, and returns the object key.
+     *
+     * @param srcPath src file
+     * @param dstPath object path
+     * @return object key
+     */
+    Future<CloudObjectKey> uploadFileAsync(Path srcPath, String dstPath);
+
+    /**
+     * Asynchronously uploads a file to the destination, and returns the object key.
+     *
+     * @param srcPath src file
+     * @param dstPath object path
+     * @param contentType the content type of the data
+     * @return object key
+     */
+    Future<CloudObjectKey> uploadFileAsync(Path srcPath, String dstPath, String contentType);
     /**
      * Uploads a file to the destination, and returns the object key.
      *

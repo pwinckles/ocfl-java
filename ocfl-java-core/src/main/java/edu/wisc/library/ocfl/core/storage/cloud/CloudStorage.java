@@ -27,6 +27,7 @@ package edu.wisc.library.ocfl.core.storage.cloud;
 import edu.wisc.library.ocfl.api.OcflFileRetriever;
 import edu.wisc.library.ocfl.api.exception.OcflFileAlreadyExistsException;
 import edu.wisc.library.ocfl.api.exception.OcflIOException;
+import edu.wisc.library.ocfl.api.exception.OcflJavaException;
 import edu.wisc.library.ocfl.api.exception.OcflNoSuchFileException;
 import edu.wisc.library.ocfl.api.model.DigestAlgorithm;
 import edu.wisc.library.ocfl.api.util.Enforce;
@@ -42,8 +43,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Future;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -239,16 +240,48 @@ public class CloudStorage implements Storage {
     public void moveDirectoryInto(Path source, String destination) {
         failOnExistingDir(destination);
 
-        var objectKeys = Collections.synchronizedList(new ArrayList<String>());
+        var objectKeys = new ArrayList<String>();
 
         try (var paths = Files.find(source, Integer.MAX_VALUE, (file, attrs) -> attrs.isRegularFile())) {
-            paths.forEach(file -> {
-                var relative = FileUtil.pathToStringStandardSeparator(source.relativize(file));
-                var key = FileUtil.pathJoinFailEmpty(destination, relative);
-                client.uploadFile(file, key);
-                objectKeys.add(key);
-            });
+            var hasErrors = false;
+            var interrupted = false;
+            var futures = new ArrayList<Future<CloudObjectKey>>();
+
+            try {
+                for (var it = paths.iterator(); it.hasNext(); ) {
+                    var file = it.next();
+                    var relative = FileUtil.pathToStringStandardSeparator(source.relativize(file));
+                    var key = FileUtil.pathJoinFailEmpty(destination, relative);
+                    futures.add(client.uploadFileAsync(file, key));
+                }
+            } catch (RuntimeException e) {
+                // If any of the uploads fail before the future is created, we want to short-circuit but still need
+                // to wait for the successfully started uploads to complete.
+                hasErrors = true;
+                LOG.error(e.getMessage(), e);
+            }
+
+            for (var future : futures) {
+                try {
+                    objectKeys.add(future.get().getKey());
+                } catch (InterruptedException e) {
+                    hasErrors = true;
+                    interrupted = true;
+                } catch (Exception e) {
+                    hasErrors = true;
+                    LOG.error(e.getMessage(), e);
+                }
+            }
+
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+
+            if (hasErrors) {
+                throw new OcflJavaException("Failed to move files in " + source + " into " + destination);
+            }
         } catch (IOException | RuntimeException e) {
+            // If any of the files failed to upload, then we must delete everything.
             client.safeDeleteObjects(objectKeys);
 
             if (e instanceof IOException) {

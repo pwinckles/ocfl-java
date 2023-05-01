@@ -43,7 +43,8 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -169,15 +170,15 @@ public class OcflS3Client implements CloudClient {
      * {@inheritDoc}
      */
     @Override
-    public CloudObjectKey uploadFile(Path srcPath, String dstPath) {
-        return uploadFile(srcPath, dstPath, null);
+    public Future<CloudObjectKey> uploadFileAsync(Path srcPath, String dstPath) {
+        return uploadFileAsync(srcPath, dstPath, null);
     }
 
     /**
      * {@inheritDoc}
      */
     @Override
-    public CloudObjectKey uploadFile(Path srcPath, String dstPath, String contentType) {
+    public Future<CloudObjectKey> uploadFileAsync(Path srcPath, String dstPath, String contentType) {
         var fileSize = UncheckedFiles.size(srcPath);
         var dstKey = keyBuilder.buildFromPath(dstPath);
 
@@ -194,13 +195,31 @@ public class OcflS3Client implements CloudClient {
                         .build())
                 .build());
 
-        try {
-            upload.completionFuture().join();
-        } catch (RuntimeException e) {
-            throw new OcflS3Exception("Failed to upload " + srcPath + " to " + dstKey, unwrapCompletionEx(e));
-        }
+        return new UploadFuture(upload, srcPath, dstKey);
+    }
 
-        return dstKey;
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CloudObjectKey uploadFile(Path srcPath, String dstPath) {
+        return uploadFile(srcPath, dstPath, null);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CloudObjectKey uploadFile(Path srcPath, String dstPath, String contentType) {
+        var future = uploadFileAsync(srcPath, dstPath, contentType);
+        try {
+            return future.get();
+        } catch (ExecutionException e) {
+            throw (RuntimeException) e.getCause();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new OcflS3Exception("Failed ot upload " + srcPath, e);
+        }
     }
 
     /**
@@ -219,7 +238,7 @@ public class OcflS3Client implements CloudClient {
             s3Client.putObject(builder.bucket(bucket).key(dstKey.getKey()).build(), AsyncRequestBody.fromBytes(bytes))
                     .join();
         } catch (RuntimeException e) {
-            throw new OcflS3Exception("Failed to upload bytes to " + dstKey, unwrapCompletionEx(e));
+            throw new OcflS3Exception("Failed to upload bytes to " + dstKey, OcflS3Util.unwrapCompletionEx(e));
         }
 
         return dstKey;
@@ -245,7 +264,7 @@ public class OcflS3Client implements CloudClient {
 
             copy.completionFuture().join();
         } catch (RuntimeException e) {
-            var cause = unwrapCompletionEx(e);
+            var cause = OcflS3Util.unwrapCompletionEx(e);
             if (wasNotFound(cause)) {
                 throw new KeyNotFoundException("Key " + srcKey + " not found in bucket " + bucket, cause);
             }
@@ -271,7 +290,7 @@ public class OcflS3Client implements CloudClient {
 
             download.completionFuture().join();
         } catch (RuntimeException e) {
-            var cause = unwrapCompletionEx(e);
+            var cause = OcflS3Util.unwrapCompletionEx(e);
             if (wasNotFound(cause)) {
                 throw new KeyNotFoundException("Key " + srcKey + " not found in bucket " + bucket, cause);
             }
@@ -298,7 +317,7 @@ public class OcflS3Client implements CloudClient {
                             AsyncResponseTransformer.toBlockingInputStream())
                     .join();
         } catch (RuntimeException e) {
-            var cause = unwrapCompletionEx(e);
+            var cause = OcflS3Util.unwrapCompletionEx(e);
             if (wasNotFound(cause)) {
                 throw new KeyNotFoundException("Key " + srcKey + " not found in bucket " + bucket, cause);
             }
@@ -338,7 +357,7 @@ public class OcflS3Client implements CloudClient {
                     .setETag(s3Result.eTag())
                     .setLastModified(s3Result.lastModified());
         } catch (RuntimeException e) {
-            var cause = unwrapCompletionEx(e);
+            var cause = OcflS3Util.unwrapCompletionEx(e);
             if (wasNotFound(cause)) {
                 throw new KeyNotFoundException("Key " + key + " not found in bucket " + bucket, cause);
             }
@@ -397,7 +416,7 @@ public class OcflS3Client implements CloudClient {
             return response.contents().stream().findAny().isPresent()
                     || response.commonPrefixes().stream().findAny().isPresent();
         } catch (RuntimeException e) {
-            throw new OcflS3Exception("Failed to list objects under " + prefix, unwrapCompletionEx(e));
+            throw new OcflS3Exception("Failed to list objects under " + prefix, OcflS3Util.unwrapCompletionEx(e));
         }
     }
 
@@ -453,7 +472,7 @@ public class OcflS3Client implements CloudClient {
                 CompletableFuture.allOf(futures.toArray(new CompletableFuture[] {}))
                         .join();
             } catch (RuntimeException e) {
-                throw new OcflS3Exception("Failed to delete objects " + objectIds, unwrapCompletionEx(e));
+                throw new OcflS3Exception("Failed to delete objects " + objectIds, OcflS3Util.unwrapCompletionEx(e));
             }
         }
     }
@@ -488,7 +507,7 @@ public class OcflS3Client implements CloudClient {
                     .join();
             return true;
         } catch (RuntimeException e) {
-            var cause = unwrapCompletionEx(e);
+            var cause = OcflS3Util.unwrapCompletionEx(e);
             if (wasNotFound(cause)) {
                 return false;
             }
@@ -518,7 +537,7 @@ public class OcflS3Client implements CloudClient {
 
             return new ListResult().setObjects(objects).setDirectories(dirs);
         } catch (RuntimeException e) {
-            throw new OcflS3Exception("Failed to list objects", unwrapCompletionEx(e));
+            throw new OcflS3Exception("Failed to list objects", OcflS3Util.unwrapCompletionEx(e));
         }
     }
 
@@ -552,21 +571,6 @@ public class OcflS3Client implements CloudClient {
             }
         }
         return prefixLength;
-    }
-
-    /**
-     * If the exception is a CompletionException, then the exception's cause is returned. Otherwise, the exception
-     * itself is returned.
-     *
-     * @param e the exception
-     * @return the exception or its cause
-     */
-    private Throwable unwrapCompletionEx(RuntimeException e) {
-        Throwable cause = e;
-        if (e instanceof CompletionException) {
-            cause = e.getCause();
-        }
-        return cause;
     }
 
     /**
