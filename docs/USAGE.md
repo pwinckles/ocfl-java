@@ -89,6 +89,10 @@ OCFL repository that supports the [mutable HEAD extension](https://ocfl.github.i
   most cloud storage, including S3, is now strongly consistent. Use
   `ObjectDetailsDatabaseBuilder` to construct an
   `ObjectDetailsDatabase`.
+* **fileLockTimeoutDuration**: Configures the max amount of time to wait
+  for a file lock when updating an object from multiple threads. This
+  only matters if you concurrently write files to the same object, and
+  can otherwise be ignored. The default timeout is 1 minute.
 
 ## Storage Implementations
 
@@ -237,6 +241,45 @@ instances, you should use a database based object lock rather than the
 default in-memory lock. Additionally, you may want to either adjust or
 disable inventory caching, or hook up a distributed cache
 implementation.
+
+### Improving write performance
+
+If your objects have a lot of files, then you _might_ get better
+performance by parallelizing file reads and writes. Parallel writes
+are only supported as of `ocfl-java` 2.0.0 or later. `ocfl-java` does
+not do this for you automatically, but the following is some example
+code of one possible way that you could implement parallel writes
+to an object:
+
+```java
+repo.updateObject(ObjectVersionId.head(objectId), versionInfo, updater -> {
+    List<? extends Future<?>> futures;
+    try (var files = Files.find(
+            objectPath, Integer.MAX_VALUE, (file, attrs) -> attrs.isRegularFile())) {
+        futures = files.map(file -> executor.submit(() -> {
+                    var logical = objectPath
+                            .relativize(file)
+                            .toString();
+                    updater.addPath(file, logical);
+                }))
+                .toList();
+    } catch (IOException e) {
+        throw new UncheckedIOException(e);
+    }
+    futures.forEach(future -> {
+        try {
+            future.get();
+        } catch (Exception e) {
+            throw new RuntimeException("Error adding file to object " + objectId, e);
+        }
+    });
+});
+```
+
+The key bit here is that you use an `ExecutorService` to add multiple
+files to the object at the same. You would likely want to use one thread
+pool per object. Additionally, note that this technique will likely
+make writes _slower_ if you are not writing a lot of files.
 
 ### Inventory size
 
