@@ -95,6 +95,7 @@ public class InMemoryObjectLock implements ObjectLock {
                 throw new LockException("Failed to acquire lock for object " + objectId);
             }
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             throw new LockException(e);
         }
     }

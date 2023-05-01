@@ -72,6 +72,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.security.DigestOutputStream;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -93,16 +94,16 @@ public class DefaultOcflRepository implements OcflRepository {
 
     private static final Logger LOG = LoggerFactory.getLogger(DefaultOcflRepository.class);
 
+    private final OcflConfig config;
     private final boolean verifyStaging;
-    protected final OcflStorage storage;
-    protected final InventoryMapper inventoryMapper;
-    protected final Path workDir;
-    protected final ObjectLock objectLock;
-    protected final ResponseMapper responseMapper;
+    private final Duration fileLockTimeoutDuration;
+    private final OcflStorage storage;
+    private final InventoryMapper inventoryMapper;
+    private final Path workDir;
+    private final ObjectLock objectLock;
+    private final ResponseMapper responseMapper;
     protected final InventoryUpdater.Builder inventoryUpdaterBuilder;
     protected final AddFileProcessor.Builder addFileProcessorBuilder;
-
-    protected final OcflConfig config;
 
     private Clock clock;
 
@@ -119,6 +120,7 @@ public class DefaultOcflRepository implements OcflRepository {
      * @param contentPathConstraintProcessor content path constraint processor
      * @param config ocfl defaults configuration
      * @param verifyStaging true if the contents of a stage version should be double-checked
+     * @param fileLockTimeoutDuration the max amount of time to wait for a file lock
      */
     public DefaultOcflRepository(
             OcflStorage storage,
@@ -128,13 +130,16 @@ public class DefaultOcflRepository implements OcflRepository {
             LogicalPathMapper logicalPathMapper,
             ContentPathConstraintProcessor contentPathConstraintProcessor,
             OcflConfig config,
-            boolean verifyStaging) {
+            boolean verifyStaging,
+            Duration fileLockTimeoutDuration) {
         this.storage = Enforce.notNull(storage, "storage cannot be null");
         this.workDir = Enforce.notNull(workDir, "workDir cannot be null");
         this.objectLock = Enforce.notNull(objectLock, "objectLock cannot be null");
         this.inventoryMapper = Enforce.notNull(inventoryMapper, "inventoryMapper cannot be null");
         this.config = Enforce.notNull(config, "config cannot be null");
         this.verifyStaging = verifyStaging;
+        this.fileLockTimeoutDuration =
+                Enforce.notNull(fileLockTimeoutDuration, "fileLockTimeoutDuration cannot be null");
 
         inventoryUpdaterBuilder = InventoryUpdater.builder()
                 .contentPathMapperBuilder(ContentPathMapper.builder()
@@ -170,7 +175,9 @@ public class DefaultOcflRepository implements OcflRepository {
         var stagingDir = createStagingDir(objectVersionId.getObjectId());
         var contentDir = createStagingContentDir(inventory, stagingDir);
 
-        var fileProcessor = addFileProcessorBuilder.build(inventoryUpdater, contentDir, inventory.getDigestAlgorithm());
+        var fileLocker = new FileLocker(fileLockTimeoutDuration);
+        var fileProcessor =
+                addFileProcessorBuilder.build(inventoryUpdater, fileLocker, contentDir, inventory.getDigestAlgorithm());
         fileProcessor.processPath(path, options);
 
         var upgrade = inventoryUpdater.upgradeInventory(config);
@@ -206,9 +213,11 @@ public class DefaultOcflRepository implements OcflRepository {
         var contentDir = createStagingContentDir(inventory, stagingDir);
 
         var inventoryUpdater = inventoryUpdaterBuilder.buildCopyState(inventory);
+        var fileLocker = new FileLocker(fileLockTimeoutDuration);
         var addFileProcessor =
-                addFileProcessorBuilder.build(inventoryUpdater, contentDir, inventory.getDigestAlgorithm());
-        var updater = new DefaultOcflObjectUpdater(inventory, inventoryUpdater, contentDir, addFileProcessor);
+                addFileProcessorBuilder.build(inventoryUpdater, fileLocker, contentDir, inventory.getDigestAlgorithm());
+        var updater =
+                new DefaultOcflObjectUpdater(inventory, inventoryUpdater, contentDir, addFileProcessor, fileLocker);
 
         try {
             objectUpdater.accept(updater);

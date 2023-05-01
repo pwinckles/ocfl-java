@@ -186,7 +186,7 @@ public class InventoryUpdater {
      * @param versionInfo information about the version
      * @return new inventory
      */
-    public Inventory buildNewInventory(OffsetDateTime createdTimestamp, VersionInfo versionInfo) {
+    public synchronized Inventory buildNewInventory(OffsetDateTime createdTimestamp, VersionInfo versionInfo) {
         return inventoryBuilder
                 .addHeadVersion(versionBuilder
                         .versionInfo(versionInfo)
@@ -202,7 +202,7 @@ public class InventoryUpdater {
      * @param config the OCFL configuration
      * @return true if the inventory is upgraded; false otherwise
      */
-    public boolean upgradeInventory(OcflConfig config) {
+    public synchronized boolean upgradeInventory(OcflConfig config) {
         if (config.isUpgradeObjectsOnWrite()
                 && inventoryBuilder.getType().compareTo(config.getOcflVersion().getInventoryType()) < 0) {
             inventoryBuilder.type(config.getOcflVersion().getInventoryType());
@@ -219,7 +219,7 @@ public class InventoryUpdater {
      * @param options options
      * @return details about the file if it was added to the manifest
      */
-    public AddFileResult addFile(String fileId, String logicalPath, OcflOption... options) {
+    public synchronized AddFileResult addFile(String fileId, String logicalPath, OcflOption... options) {
         logicalPathConstraints.apply(logicalPath);
 
         overwriteProtection(logicalPath, options);
@@ -260,7 +260,7 @@ public class InventoryUpdater {
      * @param algorithm algorithm used to calculate the digest
      * @param digest the digest value
      */
-    public void addFixity(String logicalPath, DigestAlgorithm algorithm, String digest) {
+    public synchronized void addFixity(String logicalPath, DigestAlgorithm algorithm, String digest) {
         if (algorithm.equals(inventory.getDigestAlgorithm())) {
             return;
         }
@@ -281,7 +281,7 @@ public class InventoryUpdater {
      * @param algorithm the digest algorithm
      * @return the digest or null
      */
-    public String getFixityDigest(String logicalPath, DigestAlgorithm algorithm) {
+    public synchronized String getFixityDigest(String logicalPath, DigestAlgorithm algorithm) {
         if (inventory.getDigestAlgorithm().equals(algorithm)) {
             return versionBuilder.getFileId(logicalPath);
         }
@@ -299,7 +299,7 @@ public class InventoryUpdater {
     /**
      * Removes all entries from the fixity block.
      */
-    public void clearFixity() {
+    public synchronized void clearFixity() {
         inventoryBuilder.clearFixity();
     }
 
@@ -310,7 +310,7 @@ public class InventoryUpdater {
      * @param logicalPath logical path to the file
      * @return files that were removed from the manifest
      */
-    public Set<RemoveFileResult> removeFile(String logicalPath) {
+    public synchronized Set<RemoveFileResult> removeFile(String logicalPath) {
         var fileId = versionBuilder.removeLogicalPath(logicalPath);
         return removeFileFromManifestWithResults(fileId);
     }
@@ -325,7 +325,8 @@ public class InventoryUpdater {
      * @param options options
      * @return files that were removed from the manifest
      */
-    public Set<RemoveFileResult> renameFile(String srcLogicalPath, String dstLogicalPath, OcflOption... options) {
+    public synchronized Set<RemoveFileResult> renameFile(
+            String srcLogicalPath, String dstLogicalPath, OcflOption... options) {
         logicalPathConstraints.apply(dstLogicalPath);
 
         var srcDigest = versionBuilder.getFileId(srcLogicalPath);
@@ -358,7 +359,7 @@ public class InventoryUpdater {
      * @param options options
      * @return files that were removed from the manifest
      */
-    public Set<RemoveFileResult> reinstateFile(
+    public synchronized Set<RemoveFileResult> reinstateFile(
             VersionNum sourceVersion, String srcLogicalPath, String dstLogicalPath, OcflOption... options) {
         logicalPathConstraints.apply(dstLogicalPath);
 
@@ -383,7 +384,7 @@ public class InventoryUpdater {
     /**
      * Removes all of the files from the version's state.
      */
-    public void clearState() {
+    public synchronized void clearState() {
         var state = new HashSet<>(versionBuilder.getInvertedState().keySet());
         state.forEach(this::removeFile);
     }

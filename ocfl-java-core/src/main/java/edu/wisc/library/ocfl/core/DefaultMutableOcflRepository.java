@@ -41,6 +41,7 @@ import edu.wisc.library.ocfl.core.storage.OcflStorage;
 import edu.wisc.library.ocfl.core.util.FileUtil;
 import edu.wisc.library.ocfl.core.util.UncheckedFiles;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,6 +59,12 @@ public class DefaultMutableOcflRepository extends DefaultOcflRepository implemen
 
     private static final Logger LOG = LoggerFactory.getLogger(DefaultMutableOcflRepository.class);
 
+    private final OcflConfig config;
+    private final Duration fileLockTimeoutDuration;
+    private final OcflStorage storage;
+    private final Path workDir;
+    private final ObjectLock objectLock;
+
     /**
      * @see OcflRepositoryBuilder
      *
@@ -69,6 +76,7 @@ public class DefaultMutableOcflRepository extends DefaultOcflRepository implemen
      * @param contentPathConstraintProcessor content path constraint processor
      * @param config ocfl defaults configuration
      * @param verifyStaging true if the contents of a stage version should be double-checked
+     * @param fileLockTimeoutDuration the max amount of time to wait for a file lock
      */
     public DefaultMutableOcflRepository(
             OcflStorage storage,
@@ -78,7 +86,8 @@ public class DefaultMutableOcflRepository extends DefaultOcflRepository implemen
             LogicalPathMapper logicalPathMapper,
             ContentPathConstraintProcessor contentPathConstraintProcessor,
             OcflConfig config,
-            boolean verifyStaging) {
+            boolean verifyStaging,
+            Duration fileLockTimeoutDuration) {
         super(
                 storage,
                 workDir,
@@ -87,7 +96,14 @@ public class DefaultMutableOcflRepository extends DefaultOcflRepository implemen
                 logicalPathMapper,
                 contentPathConstraintProcessor,
                 config,
-                verifyStaging);
+                verifyStaging,
+                fileLockTimeoutDuration);
+        this.storage = Enforce.notNull(storage, "storage cannot be null");
+        this.workDir = Enforce.notNull(workDir, "workDir cannot be null");
+        this.objectLock = Enforce.notNull(objectLock, "objectLock cannot be null");
+        this.config = Enforce.notNull(config, "config cannot be null");
+        this.fileLockTimeoutDuration =
+                Enforce.notNull(fileLockTimeoutDuration, "fileLockTimeoutDuration cannot be null");
     }
 
     /**
@@ -118,9 +134,11 @@ public class DefaultMutableOcflRepository extends DefaultOcflRepository implemen
                 .getParent();
 
         var inventoryUpdater = inventoryUpdaterBuilder.buildCopyStateMutable(inventory);
+        var fileLocker = new FileLocker(fileLockTimeoutDuration);
         var addFileProcessor =
-                addFileProcessorBuilder.build(inventoryUpdater, contentDir, inventory.getDigestAlgorithm());
-        var updater = new DefaultOcflObjectUpdater(inventory, inventoryUpdater, contentDir, addFileProcessor);
+                addFileProcessorBuilder.build(inventoryUpdater, fileLocker, contentDir, inventory.getDigestAlgorithm());
+        var updater =
+                new DefaultOcflObjectUpdater(inventory, inventoryUpdater, contentDir, addFileProcessor, fileLocker);
 
         try {
             objectUpdater.accept(updater);

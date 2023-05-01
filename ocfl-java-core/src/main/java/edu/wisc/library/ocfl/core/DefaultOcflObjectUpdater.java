@@ -45,16 +45,14 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.DigestInputStream;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Default implementation of OcflObjectUpdater that is used by DefaultOcflRepository to provide write access to an object.
- *
- * <p>This class is NOT thread safe.
  */
 public class DefaultOcflObjectUpdater implements OcflObjectUpdater {
 
@@ -64,20 +62,21 @@ public class DefaultOcflObjectUpdater implements OcflObjectUpdater {
     private final InventoryUpdater inventoryUpdater;
     private final Path stagingDir;
     private final AddFileProcessor addFileProcessor;
-
+    private final FileLocker fileLocker;
     private final Map<String, Path> stagedFileMap;
 
     public DefaultOcflObjectUpdater(
             Inventory inventory,
             InventoryUpdater inventoryUpdater,
             Path stagingDir,
-            AddFileProcessor addFileProcessor) {
+            AddFileProcessor addFileProcessor,
+            FileLocker fileLocker) {
         this.inventory = Enforce.notNull(inventory, "inventory cannot be null");
         this.inventoryUpdater = Enforce.notNull(inventoryUpdater, "inventoryUpdater cannot be null");
         this.stagingDir = Enforce.notNull(stagingDir, "stagingDir cannot be null");
         this.addFileProcessor = Enforce.notNull(addFileProcessor, "addFileProcessor cannot be null");
-
-        this.stagedFileMap = new HashMap<>();
+        this.fileLocker = Enforce.notNull(fileLocker, "fileLocker cannot be null");
+        this.stagedFileMap = new ConcurrentHashMap<>();
     }
 
     @Override
@@ -129,51 +128,53 @@ public class DefaultOcflObjectUpdater implements OcflObjectUpdater {
         Enforce.notNull(input, "input cannot be null");
         Enforce.notBlank(destinationPath, "destinationPath cannot be blank");
 
-        LOG.debug("Write stream to object <{}> at logical path <{}>", inventory.getId(), destinationPath);
+        return fileLocker.withLock(destinationPath, () -> {
+            LOG.debug("Write stream to object <{}> at logical path <{}>", inventory.getId(), destinationPath);
 
-        var stagingFullPath = stagingFullPath(inventoryUpdater.innerContentPath(destinationPath));
+            var stagingFullPath = stagingFullPath(inventoryUpdater.innerContentPath(destinationPath));
 
-        var digestInput = wrapInDigestInputStream(input);
-        LOG.debug("Writing input stream to: {}", stagingFullPath);
-        if (Files.notExists(stagingFullPath.getParent())) {
-            UncheckedFiles.createDirectories(stagingFullPath.getParent());
-        }
-        UncheckedFiles.copy(digestInput, stagingFullPath, StandardCopyOption.REPLACE_EXISTING);
-
-        if (input instanceof FixityCheckInputStream) {
-            try {
-                ((FixityCheckInputStream) input).checkFixity();
-            } catch (FixityCheckException e) {
-                FileUtil.safeDelete(stagingFullPath);
-                FileUtil.deleteDirAndParentsIfEmpty(stagingFullPath.getParent(), stagingDir);
-                throw e;
+            var digestInput = wrapInDigestInputStream(input);
+            LOG.debug("Writing input stream to: {}", stagingFullPath);
+            if (Files.notExists(stagingFullPath.getParent())) {
+                UncheckedFiles.createDirectories(stagingFullPath.getParent());
             }
-        }
+            UncheckedFiles.copy(digestInput, stagingFullPath, StandardCopyOption.REPLACE_EXISTING);
 
-        String digest;
+            if (input instanceof FixityCheckInputStream) {
+                try {
+                    ((FixityCheckInputStream) input).checkFixity();
+                } catch (FixityCheckException e) {
+                    FileUtil.safeDelete(stagingFullPath);
+                    FileUtil.deleteDirAndParentsIfEmpty(stagingFullPath.getParent(), stagingDir);
+                    throw e;
+                }
+            }
 
-        if (digestInput instanceof FixityCheckInputStream) {
-            digest = ((FixityCheckInputStream) digestInput)
-                    .getActualDigestValue()
-                    .get();
-        } else {
-            digest = Bytes.wrap(digestInput.getMessageDigest().digest()).encodeHex();
-        }
+            String digest;
 
-        var result = inventoryUpdater.addFile(digest, destinationPath, options);
+            if (digestInput instanceof FixityCheckInputStream) {
+                digest = ((FixityCheckInputStream) digestInput)
+                        .getActualDigestValue()
+                        .get();
+            } else {
+                digest = Bytes.wrap(digestInput.getMessageDigest().digest()).encodeHex();
+            }
 
-        if (!result.isNew()) {
-            LOG.debug(
-                    "Deleting file <{}> because a file with same digest <{}> is already present in the object",
-                    stagingFullPath,
-                    digest);
-            UncheckedFiles.delete(stagingFullPath);
-            FileUtil.deleteDirAndParentsIfEmpty(stagingFullPath.getParent(), stagingDir);
-        } else {
-            stagedFileMap.put(destinationPath, stagingFullPath);
-        }
+            var result = inventoryUpdater.addFile(digest, destinationPath, options);
 
-        return this;
+            if (!result.isNew()) {
+                LOG.debug(
+                        "Deleting file <{}> because a file with same digest <{}> is already present in the object",
+                        stagingFullPath,
+                        digest);
+                UncheckedFiles.delete(stagingFullPath);
+                FileUtil.deleteDirAndParentsIfEmpty(stagingFullPath.getParent(), stagingDir);
+            } else {
+                stagedFileMap.put(destinationPath, stagingFullPath);
+            }
+
+            return this;
+        });
     }
 
     /**
@@ -183,12 +184,14 @@ public class DefaultOcflObjectUpdater implements OcflObjectUpdater {
     public OcflObjectUpdater removeFile(String path) {
         Enforce.notBlank(path, "path cannot be blank");
 
-        LOG.debug("Remove <{}> from object <{}>", path, inventory.getId());
+        return fileLocker.withLock(path, () -> {
+            LOG.debug("Remove <{}> from object <{}>", path, inventory.getId());
 
-        var results = inventoryUpdater.removeFile(path);
-        removeUnneededStagedFiles(results);
+            var results = inventoryUpdater.removeFile(path);
+            removeUnneededStagedFiles(results);
 
-        return this;
+            return this;
+        });
     }
 
     /**
@@ -199,12 +202,23 @@ public class DefaultOcflObjectUpdater implements OcflObjectUpdater {
         Enforce.notBlank(sourcePath, "sourcePath cannot be blank");
         Enforce.notBlank(destinationPath, "destinationPath cannot be blank");
 
-        LOG.debug("Rename file in object <{}> from <{}> to <{}>", inventory.getId(), sourcePath, destinationPath);
+        var lock1 = fileLocker.lock(sourcePath);
+        try {
+            var lock2 = fileLocker.lock(destinationPath);
+            try {
+                LOG.debug(
+                        "Rename file in object <{}> from <{}> to <{}>", inventory.getId(), sourcePath, destinationPath);
 
-        var results = inventoryUpdater.renameFile(sourcePath, destinationPath, options);
-        removeUnneededStagedFiles(results);
+                var results = inventoryUpdater.renameFile(sourcePath, destinationPath, options);
+                removeUnneededStagedFiles(results);
 
-        return this;
+                return this;
+            } finally {
+                lock2.unlock();
+            }
+        } finally {
+            lock1.unlock();
+        }
     }
 
     /**
@@ -217,12 +231,14 @@ public class DefaultOcflObjectUpdater implements OcflObjectUpdater {
         Enforce.notBlank(sourcePath, "sourcePath cannot be blank");
         Enforce.notBlank(destinationPath, "destinationPath cannot be blank");
 
-        LOG.debug("Reinstate file at <{}> in object <{}> to <{}>", sourcePath, sourceVersionNum, destinationPath);
+        return fileLocker.withLock(destinationPath, () -> {
+            LOG.debug("Reinstate file at <{}> in object <{}> to <{}>", sourcePath, sourceVersionNum, destinationPath);
 
-        var results = inventoryUpdater.reinstateFile(sourceVersionNum, sourcePath, destinationPath, options);
-        removeUnneededStagedFiles(results);
+            var results = inventoryUpdater.reinstateFile(sourceVersionNum, sourcePath, destinationPath, options);
+            removeUnneededStagedFiles(results);
 
-        return this;
+            return this;
+        });
     }
 
     /**
@@ -244,47 +260,49 @@ public class DefaultOcflObjectUpdater implements OcflObjectUpdater {
         Enforce.notNull(algorithm, "algorithm cannot be null");
         Enforce.notBlank(value, "value cannot be null");
 
-        LOG.debug(
-                "Add file fixity for file <{}> in object <{}>: Algorithm: {}; Value: {}",
-                logicalPath,
-                inventory.getId(),
-                algorithm.getOcflName(),
-                value);
+        return fileLocker.withLock(logicalPath, () -> {
+            LOG.debug(
+                    "Add file fixity for file <{}> in object <{}>: Algorithm: {}; Value: {}",
+                    logicalPath,
+                    inventory.getId(),
+                    algorithm.getOcflName(),
+                    value);
 
-        var digest = inventoryUpdater.getFixityDigest(logicalPath, algorithm);
-        var alreadyExists = true;
+            var digest = inventoryUpdater.getFixityDigest(logicalPath, algorithm);
+            var alreadyExists = true;
 
-        if (digest == null) {
-            alreadyExists = false;
+            if (digest == null) {
+                alreadyExists = false;
 
-            if (!stagedFileMap.containsKey(logicalPath)) {
-                throw new OcflInputException(String.format(
-                        "%s was not newly added in this update. Fixity information can only be added on new files.",
-                        logicalPath));
+                if (!algorithm.hasJavaStandardName()) {
+                    throw new OcflInputException(
+                            "The specified digest algorithm is not mapped to a Java name: " + algorithm);
+                }
+
+                var file = stagedFileMap.get(logicalPath);
+
+                if (file == null) {
+                    throw new OcflInputException(String.format(
+                            "%s was not newly added in this update. Fixity information can only be added on new files.",
+                            logicalPath));
+                }
+
+                LOG.debug("Computing {} hash of {}", algorithm.getJavaStandardName(), file);
+                digest = DigestUtil.computeDigestHex(algorithm, file);
             }
 
-            if (!algorithm.hasJavaStandardName()) {
-                throw new OcflInputException(
-                        "The specified digest algorithm is not mapped to a Java name: " + algorithm);
+            if (!value.equalsIgnoreCase(digest)) {
+                throw new FixityCheckException(String.format(
+                        "Expected %s digest of %s to be %s, but was %s.",
+                        algorithm.getJavaStandardName(), logicalPath, value, digest));
             }
 
-            var file = stagedFileMap.get(logicalPath);
+            if (!alreadyExists) {
+                inventoryUpdater.addFixity(logicalPath, algorithm, digest);
+            }
 
-            LOG.debug("Computing {} hash of {}", algorithm.getJavaStandardName(), file);
-            digest = DigestUtil.computeDigestHex(algorithm, file);
-        }
-
-        if (!value.equalsIgnoreCase(digest)) {
-            throw new FixityCheckException(String.format(
-                    "Expected %s digest of %s to be %s, but was %s.",
-                    algorithm.getJavaStandardName(), logicalPath, value, digest));
-        }
-
-        if (!alreadyExists) {
-            inventoryUpdater.addFixity(logicalPath, algorithm, digest);
-        }
-
-        return this;
+            return this;
+        });
     }
 
     /**

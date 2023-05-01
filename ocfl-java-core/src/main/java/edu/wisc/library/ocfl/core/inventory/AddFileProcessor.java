@@ -29,6 +29,7 @@ import edu.wisc.library.ocfl.api.OcflOption;
 import edu.wisc.library.ocfl.api.exception.OcflIOException;
 import edu.wisc.library.ocfl.api.model.DigestAlgorithm;
 import edu.wisc.library.ocfl.api.util.Enforce;
+import edu.wisc.library.ocfl.core.FileLocker;
 import edu.wisc.library.ocfl.core.util.DigestUtil;
 import edu.wisc.library.ocfl.core.util.FileUtil;
 import edu.wisc.library.ocfl.core.util.UncheckedFiles;
@@ -41,9 +42,10 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.DigestOutputStream;
-import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,9 +57,9 @@ public class AddFileProcessor {
     private static final Logger LOG = LoggerFactory.getLogger(AddFileProcessor.class);
 
     private final InventoryUpdater inventoryUpdater;
+    private final FileLocker fileLocker;
     private final Path stagingDir;
     private final DigestAlgorithm digestAlgorithm;
-    private final MessageDigest messageDigest;
 
     public static Builder builder() {
         return new Builder();
@@ -66,8 +68,11 @@ public class AddFileProcessor {
     public static class Builder {
 
         public AddFileProcessor build(
-                InventoryUpdater inventoryUpdater, Path stagingDir, DigestAlgorithm digestAlgorithm) {
-            return new AddFileProcessor(inventoryUpdater, stagingDir, digestAlgorithm);
+                InventoryUpdater inventoryUpdater,
+                FileLocker fileLocker,
+                Path stagingDir,
+                DigestAlgorithm digestAlgorithm) {
+            return new AddFileProcessor(inventoryUpdater, fileLocker, stagingDir, digestAlgorithm);
         }
     }
 
@@ -78,11 +83,15 @@ public class AddFileProcessor {
      * @param stagingDir the staging directory to move files into
      * @param digestAlgorithm the digest algorithm
      */
-    public AddFileProcessor(InventoryUpdater inventoryUpdater, Path stagingDir, DigestAlgorithm digestAlgorithm) {
+    public AddFileProcessor(
+            InventoryUpdater inventoryUpdater,
+            FileLocker fileLocker,
+            Path stagingDir,
+            DigestAlgorithm digestAlgorithm) {
         this.inventoryUpdater = Enforce.notNull(inventoryUpdater, "inventoryUpdater cannot be null");
+        this.fileLocker = Enforce.notNull(fileLocker, "fileLocker cannot be null");
         this.stagingDir = Enforce.notNull(stagingDir, "stagingDir cannot be null");
         this.digestAlgorithm = Enforce.notNull(digestAlgorithm, "digestAlgorithm cannot be null");
-        this.messageDigest = digestAlgorithm.getMessageDigest();
     }
 
     /**
@@ -110,15 +119,20 @@ public class AddFileProcessor {
 
         var results = new HashMap<String, Path>();
         var optionsSet = OcflOption.toSet(options);
+        var isMove = optionsSet.contains(OcflOption.MOVE_SOURCE);
         var destination = destinationPath(destinationPath, sourcePath);
+        var messageDigest = digestAlgorithm.getMessageDigest();
+        var locks = new ArrayList<ReentrantLock>();
 
         try (var paths = Files.find(
                 sourcePath, Integer.MAX_VALUE, (file, attrs) -> attrs.isRegularFile(), FileVisitOption.FOLLOW_LINKS)) {
-            paths.forEach(file -> {
+            for (var it = paths.iterator(); it.hasNext(); ) {
+                var file = it.next();
                 messageDigest.reset();
                 var logicalPath = logicalPath(sourcePath, file, destination);
+                locks.add(fileLocker.lock(logicalPath));
 
-                if (optionsSet.contains(OcflOption.MOVE_SOURCE)) {
+                if (isMove) {
                     var digest = DigestUtil.computeDigestHex(messageDigest, file);
                     var result = inventoryUpdater.addFile(digest, logicalPath, options);
 
@@ -167,12 +181,14 @@ public class AddFileProcessor {
                         FileUtil.deleteDirAndParentsIfEmpty(stagingFullPath.getParent(), stagingDir);
                     }
                 }
-            });
+            }
         } catch (IOException e) {
             throw new OcflIOException(e);
+        } finally {
+            locks.forEach(ReentrantLock::unlock);
         }
 
-        if (optionsSet.contains(OcflOption.MOVE_SOURCE)) {
+        if (isMove) {
             // Cleanup empty dirs
             FileUtil.safeDeleteDirectory(sourcePath);
         }
@@ -205,23 +221,26 @@ public class AddFileProcessor {
         var destination = destinationPath(destinationPath, sourcePath);
 
         var logicalPath = logicalPath(sourcePath, sourcePath, destination);
-        var result = inventoryUpdater.addFile(digest, logicalPath, options);
 
-        if (result.isNew()) {
-            var stagingFullPath = stagingFullPath(result.getPathUnderContentDir());
+        return fileLocker.withLock(logicalPath, () -> {
+            var result = inventoryUpdater.addFile(digest, logicalPath, options);
 
-            results.put(logicalPath, stagingFullPath);
+            if (result.isNew()) {
+                var stagingFullPath = stagingFullPath(result.getPathUnderContentDir());
 
-            if (optionsSet.contains(OcflOption.MOVE_SOURCE)) {
-                LOG.debug("Moving file <{}> to <{}>", sourcePath, stagingFullPath);
-                FileUtil.moveFileMakeParents(sourcePath, stagingFullPath, StandardCopyOption.REPLACE_EXISTING);
-            } else {
-                LOG.debug("Copying file <{}> to <{}>", sourcePath, stagingFullPath);
-                FileUtil.copyFileMakeParents(sourcePath, stagingFullPath, StandardCopyOption.REPLACE_EXISTING);
+                results.put(logicalPath, stagingFullPath);
+
+                if (optionsSet.contains(OcflOption.MOVE_SOURCE)) {
+                    LOG.debug("Moving file <{}> to <{}>", sourcePath, stagingFullPath);
+                    FileUtil.moveFileMakeParents(sourcePath, stagingFullPath, StandardCopyOption.REPLACE_EXISTING);
+                } else {
+                    LOG.debug("Copying file <{}> to <{}>", sourcePath, stagingFullPath);
+                    FileUtil.copyFileMakeParents(sourcePath, stagingFullPath, StandardCopyOption.REPLACE_EXISTING);
+                }
             }
-        }
 
-        return results;
+            return results;
+        });
     }
 
     private String destinationPath(String path, Path sourcePath) {
